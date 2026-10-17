@@ -1,0 +1,6 @@
+customtkinter==6.0.0
+SQLAlchemy==2.0.54
+pyodbc==5.3.0
+pandas==3.0.6
+reportlab==5.0.1
+matplotlib>=3.10.0
