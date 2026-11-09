@@ -15,6 +15,7 @@ class LoginWindow(ctk.CTk):
 
     def __init__(self):
         # Inicializo la ventana base de CustomTkinter
+        
         super().__init__()
         
         # Configuro el título oficial de la aplicación y dimensiones mínimas de seguridad

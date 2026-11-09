@@ -5,7 +5,8 @@ Sistema Inventarios Kardex Digital.
 En este archivo programé las operaciones administrativas de la plataforma:
 - CRUD de usuarios y activación/desactivación de accesos al sistema.
 - Catálogo maestro de productos (creación, edición y auto-inicialización de existencias en bodegas).
-- Bandeja de solicitudes de ajuste: consulta, autorización atómica con impacto físico en el Kardex y rechazo con justificación.
+- Bandeja de solicitudes de ajuste y traslados: consulta, autorización atómica con impacto físico en el Kardex y rechazo con justificación.
+- Regla de Stock Mínimo y Stock Insuficiente en autorizaciones.
 """
 
 from datetime import datetime
@@ -276,6 +277,7 @@ def obtener_ajustes_pendientes():
     """
     Aquí traigo todos los movimientos que están esperando resolución administrativa
     (estados 'PENDIENTE' o 'EN REVISION'), incluyendo la justificación descriptiva y solicitante.
+    Soporta tanto ajustes como traslados entre bodegas.
     """
     session = get_session()
     if not session: return []
@@ -288,20 +290,28 @@ def obtener_ajustes_pendientes():
         resultado = []
         for m in movs:
             for det in m.detalles:
+                es_traslado = "TRASLADO" in (m.tipo_movimiento.NOMBRE_TIPO.upper() if m.tipo_movimiento else "")
+                if es_traslado and m.bodega_origen and m.bodega_destino:
+                    bodega_str = f"{m.bodega_origen.NOMBRE_BODEGA} ➔ {m.bodega_destino.NOMBRE_BODEGA}"
+                else:
+                    bodega_str = (m.bodega_destino.NOMBRE_BODEGA if m.bodega_destino else (m.bodega_origen.NOMBRE_BODEGA if m.bodega_origen else "-"))
+
                 resultado.append({
                     "id_movimiento": m.ID_MOVIMIENTO,
                     "folio": m.FOLIO_COMPROBANTE,
                     "fecha": m.FECHA_MOVIMIENTO.strftime("%d/%m/%Y %I:%M %p"),
                     "tipo": m.tipo_movimiento.NOMBRE_TIPO if m.tipo_movimiento else "AJUSTE",
                     "solicitante": m.usuario_registro.NOMBRE_COMPLETO if m.usuario_registro else "-",
-                    "bodega": (m.bodega_destino.NOMBRE_BODEGA if m.bodega_destino else (m.bodega_origen.NOMBRE_BODEGA if m.bodega_origen else "-")),
+                    "bodega": bodega_str,
                     "id_bodega": m.ID_BODEGA_DESTINO or m.ID_BODEGA_ORIGEN,
+                    "id_bodega_origen": m.ID_BODEGA_ORIGEN,
+                    "id_bodega_destino": m.ID_BODEGA_DESTINO,
                     "id_producto": det.ID_PRODUCTO,
                     "producto": det.producto.DESCRIPCION_PRODUCTO if det.producto else "-",
                     "codigo": det.producto.CODIGO_UNICO if det.producto else "-",
                     "cantidad": float(det.CANTIDAD or 0),
                     "costo": float(det.COSTO_UNITARIO or 0),
-                    "motivo": m.motivo.DESCRIPCION_MOTIVO if m.motivo else "Ajuste de inventario",
+                    "motivo": m.motivo.DESCRIPCION_MOTIVO if m.motivo else ("Traslado de Inventario" if es_traslado else "Ajuste de inventario"),
                     "observaciones": m.OBSERVACIONES or "-",
                     "efecto": m.tipo_movimiento.EFECTO_STOCK if m.tipo_movimiento else 1
                 })
@@ -314,19 +324,22 @@ def obtener_ajustes_pendientes():
 
 def aprobar_ajuste(id_movimiento, id_usuario_admin):
     """
-    CIRCUITO DE AUDITORÍA: Aquí ejecuto la aprobación formal de un ajuste:
+    CIRCUITO DE AUDITORÍA: Aquí ejecuto la aprobación formal de un ajuste o traslado:
     1. Valido estrictamente que el usuario autorizador sea Administrador.
-    2. Verifico que el movimiento exista y siga pendiente.
-    3. Aplico el impacto en existencias físicas (sumando si es positivo o restando si es merma).
-    4. Bloqueo descuadres de stock negativo.
-    5. Cambio el estado a 'APROBADO', marco quién autorizó y la fecha exacta.
+    2. Verifico que el movimiento exista y siga en estado PENDIENTE.
+    3. REGLAS ESTRICTAS DE SEGURIDAD SOLICITADAS:
+       - Condición 1: Stock suficiente en la bodega de retiro.
+       - Condición 2: Conservación inquebrantable del Stock Mínimo obligatorio.
+         (Ej. si hay 15 y el mínimo es 5, no permite retirar 12 porque quedarían 3 < 5).
+    4. Aplica el impacto en existencias físicas (sumas, restas o traslados).
+    5. Asienta la auditoría con usuario autorizador y fecha exacta.
     """
     session = get_session()
     if not session:
         return False, "Base de datos no disponible."
     try:
         from controllers.auth_ctrl import is_admin_role
-        from models.entities import MovimientoKardex, ExistenciaBodega, Usuario
+        from models.entities import MovimientoKardex, ExistenciaBodega, Usuario, Producto, Bodega
 
         # Valido permisos de Administrador
         admin_user = session.query(Usuario).get(id_usuario_admin)
@@ -339,37 +352,85 @@ def aprobar_ajuste(id_movimiento, id_usuario_admin):
             return False, "El movimiento no existe o ya fue procesado."
             
         efecto = mov.tipo_movimiento.EFECTO_STOCK if mov.tipo_movimiento else 1
-        bodega_id = mov.ID_BODEGA_DESTINO if efecto > 0 else (mov.ID_BODEGA_ORIGEN or mov.ID_BODEGA_DESTINO)
-        
-        # Aplico la matemática de inventario al stock físico
-        for det in mov.detalles:
-            existencia = session.query(ExistenciaBodega).filter_by(
-                ID_PRODUCTO=det.ID_PRODUCTO, ID_BODEGA=bodega_id
-            ).first()
-            
-            saldo_anterior = float(existencia.STOCK_ACTUAL if existencia else 0.0)
-            saldo_nuevo = saldo_anterior + (float(det.CANTIDAD) * efecto)
-            
-            # Bloqueo de seguridad: Evitar saldo negativo
-            if efecto < 0 and saldo_nuevo < 0:
-                raise ValueError(f"Stock insuficiente en bodega para aprobar el ajuste negativo. Disponible: {saldo_anterior}")
-                
-            if existencia:
-                existencia.STOCK_ACTUAL = saldo_nuevo
-            else:
-                nueva_existencia = ExistenciaBodega(ID_PRODUCTO=det.ID_PRODUCTO, ID_BODEGA=bodega_id, STOCK_ACTUAL=saldo_nuevo)
-                session.add(nueva_existencia)
-                
-            det.SALDO_ANTERIOR = saldo_anterior
-            det.SALDO_NUEVO = saldo_nuevo
-            
-        # Asiento la auditoría formal en la cabecera del movimiento
+        es_traslado = "TRASLADO" in (mov.tipo_movimiento.NOMBRE_TIPO.upper() if mov.tipo_movimiento else "") or efecto == 0
+
+        # CASO 1: TRASLADO ENTRE BODEGAS
+        if es_traslado:
+            for det in mov.detalles:
+                prod = session.query(Producto).get(det.ID_PRODUCTO)
+                stock_minimo = float(prod.STOCK_MINIMO or 0.0) if prod else 0.0
+                cant = float(det.CANTIDAD or 0.0)
+
+                ex_origen = session.query(ExistenciaBodega).filter_by(ID_PRODUCTO=det.ID_PRODUCTO, ID_BODEGA=mov.ID_BODEGA_ORIGEN).first()
+                saldo_ant_origen = float(ex_origen.STOCK_ACTUAL if ex_origen else 0.0)
+                saldo_nuevo_origen = saldo_ant_origen - cant
+
+                b_origen = session.query(Bodega).get(mov.ID_BODEGA_ORIGEN)
+                nom_origen = b_origen.NOMBRE_BODEGA if b_origen else "Bodega de Origen"
+
+                # Condición 1: Stock suficiente
+                if cant > saldo_ant_origen:
+                    raise ValueError(f"No se puede aprobar el traslado: Stock insuficiente en '{nom_origen}'. Disponible: {saldo_ant_origen:.1f}, solicitado: {cant:.1f}.")
+
+                # Condición 2: Stock Mínimo
+                if saldo_nuevo_origen < stock_minimo:
+                    disp = max(0.0, saldo_ant_origen - stock_minimo)
+                    raise ValueError(f"No se puede aprobar el traslado por condición de Stock Mínimo: La bodega '{nom_origen}' debe conservar al menos {stock_minimo:.1f} unidades de '{prod.DESCRIPCION_PRODUCTO}'. Con este traslado quedarían {saldo_nuevo_origen:.1f}. Máximo a trasladar: {disp:.1f} unidades.")
+
+                ex_destino = session.query(ExistenciaBodega).filter_by(ID_PRODUCTO=det.ID_PRODUCTO, ID_BODEGA=mov.ID_BODEGA_DESTINO).first()
+                saldo_ant_destino = float(ex_destino.STOCK_ACTUAL if ex_destino else 0.0)
+                saldo_nuevo_destino = saldo_ant_destino + cant
+
+                ex_origen.STOCK_ACTUAL = saldo_nuevo_origen
+                if ex_destino:
+                    ex_destino.STOCK_ACTUAL = saldo_nuevo_destino
+                else:
+                    session.add(ExistenciaBodega(ID_PRODUCTO=det.ID_PRODUCTO, ID_BODEGA=mov.ID_BODEGA_DESTINO, STOCK_ACTUAL=saldo_nuevo_destino))
+
+                det.SALDO_ANTERIOR = saldo_ant_origen
+                det.SALDO_NUEVO = saldo_nuevo_origen
+
+        # CASO 2: AJUSTE POSITIVO O NEGATIVO
+        else:
+            bodega_id = mov.ID_BODEGA_DESTINO if efecto > 0 else (mov.ID_BODEGA_ORIGEN or mov.ID_BODEGA_DESTINO)
+            b_afectada = session.query(Bodega).get(bodega_id)
+            nom_bodega = b_afectada.NOMBRE_BODEGA if b_afectada else "Bodega"
+
+            for det in mov.detalles:
+                prod = session.query(Producto).get(det.ID_PRODUCTO)
+                stock_minimo = float(prod.STOCK_MINIMO or 0.0) if prod else 0.0
+                cant = float(det.CANTIDAD or 0.0)
+
+                existencia = session.query(ExistenciaBodega).filter_by(ID_PRODUCTO=det.ID_PRODUCTO, ID_BODEGA=bodega_id).first()
+                saldo_anterior = float(existencia.STOCK_ACTUAL if existencia else 0.0)
+                saldo_nuevo = saldo_anterior + (cant * efecto)
+
+                # Si es un ajuste negativo (disminución):
+                if efecto < 0:
+                    # Condición 1: Stock suficiente
+                    if cant > saldo_anterior:
+                        raise ValueError(f"No se puede aprobar el ajuste: Stock insuficiente en '{nom_bodega}'. Disponible: {saldo_anterior:.1f}, solicitado: {cant:.1f}.")
+
+                    # Condición 2: Stock Mínimo
+                    if saldo_nuevo < stock_minimo:
+                        disp = max(0.0, saldo_anterior - stock_minimo)
+                        raise ValueError(f"No se puede aprobar el ajuste por condición de Stock Mínimo: La bodega '{nom_bodega}' debe conservar al menos {stock_minimo:.1f} unidades de reserva de '{prod.DESCRIPCION_PRODUCTO}'. Con este ajuste quedarían {saldo_nuevo:.1f}. Máximo permitido a retirar: {disp:.1f} unidades.")
+
+                if existencia:
+                    existencia.STOCK_ACTUAL = saldo_nuevo
+                else:
+                    session.add(ExistenciaBodega(ID_PRODUCTO=det.ID_PRODUCTO, ID_BODEGA=bodega_id, STOCK_ACTUAL=saldo_nuevo))
+
+                det.SALDO_ANTERIOR = saldo_anterior
+                det.SALDO_NUEVO = saldo_nuevo
+
+        # Asiento la auditoría formal en la cabecera del comprobante
         mov.ESTADO_APROBACION = 'APROBADO'
         mov.ID_USUARIO_AUTORIZA = id_usuario_admin
         mov.FECHA_AUTORIZACION = datetime.now()
-        
+
         session.commit()
-        return True, "Ajuste aprobado y aplicado al inventario exitosamente."
+        return True, "Ajuste/traslado aprobado y aplicado al inventario exitosamente."
     except ValueError as ve:
         session.rollback()
         return False, str(ve)
@@ -421,7 +482,7 @@ def rechazar_ajuste(id_movimiento, id_usuario_admin, motivo_rechazo=""):
 
 def obtener_solicitudes_ajuste(usuario_id=None):
     """
-    Con esta consulta traigo el historial de solicitudes de ajuste (Aprobadas, Pendientes o Rechazadas),
+    Con esta consulta traigo el historial de solicitudes de ajuste y traslados,
     permitiendo a los encargados de bodega supervisar la resolución de sus solicitudes.
     """
     session = get_session()
@@ -429,26 +490,44 @@ def obtener_solicitudes_ajuste(usuario_id=None):
     try:
         from models.entities import MovimientoKardex, TipoMovimiento
         query = session.query(MovimientoKardex)\
-            .join(TipoMovimiento, MovimientoKardex.ID_TIPO_MOVIMIENTO == TipoMovimiento.ID_TIPO_MOVIMIENTO)\
-            .filter(TipoMovimiento.NOMBRE_TIPO.like('%AJUSTE%'))
+            .join(TipoMovimiento, MovimientoKardex.ID_TIPO_MOVIMIENTO == TipoMovimiento.ID_TIPO_MOVIMIENTO)
         if usuario_id:
-            query = query.filter(MovimientoKardex.ID_USUARIO_REGISTRO == usuario_id)
+            query = query.filter(
+                (MovimientoKardex.ID_USUARIO_REGISTRO == usuario_id) &
+                (
+                    (TipoMovimiento.NOMBRE_TIPO.like('%AJUSTE%')) |
+                    (TipoMovimiento.NOMBRE_TIPO.like('%TRASLADO%')) |
+                    (MovimientoKardex.ESTADO_APROBACION.in_(['PENDIENTE', 'EN REVISION', 'RECHAZADO']))
+                )
+            )
+        else:
+            query = query.filter(
+                (TipoMovimiento.NOMBRE_TIPO.like('%AJUSTE%')) |
+                (TipoMovimiento.NOMBRE_TIPO.like('%TRASLADO%')) |
+                (MovimientoKardex.ESTADO_APROBACION.in_(['PENDIENTE', 'EN REVISION', 'RECHAZADO']))
+            )
         movs = query.order_by(MovimientoKardex.FECHA_MOVIMIENTO.desc()).all()
         
         resultado = []
         for m in movs:
             for det in m.detalles:
+                es_traslado = "TRASLADO" in (m.tipo_movimiento.NOMBRE_TIPO.upper() if m.tipo_movimiento else "")
+                if es_traslado and m.bodega_origen and m.bodega_destino:
+                    bodega_str = f"{m.bodega_origen.NOMBRE_BODEGA} ➔ {m.bodega_destino.NOMBRE_BODEGA}"
+                else:
+                    bodega_str = (m.bodega_destino.NOMBRE_BODEGA if m.bodega_destino else (m.bodega_origen.NOMBRE_BODEGA if m.bodega_origen else "-"))
+
                 resultado.append({
                     "id_movimiento": m.ID_MOVIMIENTO,
                     "folio": m.FOLIO_COMPROBANTE,
                     "fecha": m.FECHA_MOVIMIENTO.strftime("%d/%m/%Y %I:%M %p"),
                     "tipo": m.tipo_movimiento.NOMBRE_TIPO if m.tipo_movimiento else "AJUSTE",
                     "solicitante": m.usuario_registro.NOMBRE_COMPLETO if m.usuario_registro else "-",
-                    "bodega": (m.bodega_destino.NOMBRE_BODEGA if m.bodega_destino else (m.bodega_origen.NOMBRE_BODEGA if m.bodega_origen else "-")),
+                    "bodega": bodega_str,
                     "producto": det.producto.DESCRIPCION_PRODUCTO if det.producto else "-",
                     "codigo": det.producto.CODIGO_UNICO if det.producto else "-",
                     "cantidad": float(det.CANTIDAD or 0),
-                    "motivo": m.motivo.DESCRIPCION_MOTIVO if m.motivo else "Ajuste de inventario",
+                    "motivo": m.motivo.DESCRIPCION_MOTIVO if m.motivo else ("Traslado de Inventario" if es_traslado else "Ajuste de inventario"),
                     "estado": m.ESTADO_APROBACION or "EN REVISION",
                     "autorizador": m.usuario_autoriza.NOMBRE_COMPLETO if m.usuario_autoriza else "-",
                     "observaciones": m.OBSERVACIONES or "-",

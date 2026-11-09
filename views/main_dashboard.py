@@ -226,6 +226,16 @@ class OperatorProfileDeck(ctk.CTkFrame):
                           command=lambda: self.app.open_movement_action("Salida"),
                           accent="amber").pack(fill="x", padx=14, pady=4)
 
+            # Botón para traslados seguros entre bodegas
+            if self.app.es_admin:
+                action_button(actions_card, "⇄   Traslado entre Bodegas",
+                              command=lambda: self.app.open_movement_action("Traslado entre Bodegas"),
+                              accent="cyan").pack(fill="x", padx=14, pady=4)
+            elif self.app.es_encargado:
+                action_button(actions_card, "⇄   Solicitar Traslado de Bodega",
+                              command=lambda: self.app.open_movement_action("Solicitar Traslado entre Bodegas"),
+                              accent="cyan").pack(fill="x", padx=14, pady=4)
+
         if self.app.es_admin:
             # Botón para saltar directo al catálogo de productos
             action_button(actions_card, "📦   Nuevo Producto en Catálogo",
@@ -308,15 +318,38 @@ class OperationStreamFeed(ctk.CTkFrame):
         scrollable = ctk.CTkScrollableFrame(feed_card, fg_color="transparent")
         scrollable.pack(fill="both", expand=True, padx=8, pady=4)
 
-        # Eventos cronológicos para mantener informado al operador de bodega
-        events = [
-            ("ENTRADA", "Laptop Dell Latitude 3420", "+15 uds • Bodega Central", "Hace 8 min", THEME_TOKENS["mint"]),
-            ("SALIDA", "Resma Papel Carta", "-10 uds • Despacho Oficina", "Hace 22 min", THEME_TOKENS["amber"]),
-            ("ALERTA", "Silla Ergonómica", "STOCK EN CERO (Agotado)", "Hace 45 min", THEME_TOKENS["crimson"]),
-            ("ENTRADA", "Monitor LG 24\"", "+8 uds • Reabastecimiento", "Hoy 10:15 AM", THEME_TOKENS["mint"]),
-            ("SALIDA", "Mouse Inalámbrico", "-2 uds • Factura #402", "Hoy 09:30 AM", THEME_TOKENS["amber"]),
-            ("ALERTA", "Monitor LG 24\"", "Stock por debajo del mínimo (8/10)", "Hoy 08:40 AM", THEME_TOKENS["amber"]),
-        ]
+        # Eventos cronológicos en tiempo real desde la base de datos (con respaldo demostrativo)
+        events = []
+        try:
+            from controllers.kardex_ctrl import obtener_detalle_movimientos_periodo
+            recent_movs = obtener_detalle_movimientos_periodo(dias=7)
+            for m in recent_movs[:8]:
+                t_up = str(m.get("tipo", "MOVIMIENTO")).upper()
+                if "TRASLADO" in t_up:
+                    color = THEME_TOKENS["cyan"]
+                    sign = "⇄ "
+                elif "ENTRADA" in t_up or "POSITIVO" in t_up or "DEVOLUCION" in t_up:
+                    color = THEME_TOKENS["mint"]
+                    sign = "+"
+                else:
+                    color = THEME_TOKENS["amber"]
+                    sign = "-"
+                estado = m.get("estado", "APROBADO")
+                tag_str = f"{t_up} ({estado})" if estado != "APROBADO" else t_up
+                detail_str = f"{sign}{float(m.get('cantidad', 0)):.1f} uds • {m.get('bodega', '-')}"
+                events.append((tag_str, str(m.get("producto", "-")), detail_str, str(m.get("fecha", "")), color))
+        except Exception:
+            events = []
+
+        if not events:
+            events = [
+                ("ENTRADA", "Laptop Dell Latitude 3420", "+15 uds • Bodega Central", "Hace 8 min", THEME_TOKENS["mint"]),
+                ("SALIDA", "Resma Papel Carta", "-10 uds • Despacho Oficina", "Hace 22 min", THEME_TOKENS["amber"]),
+                ("ALERTA", "Silla Ergonómica", "STOCK EN CERO (Agotado)", "Hace 45 min", THEME_TOKENS["crimson"]),
+                ("ENTRADA", "Monitor LG 24\"", "+8 uds • Reabastecimiento", "Hoy 10:15 AM", THEME_TOKENS["mint"]),
+                ("SALIDA", "Mouse Inalámbrico", "-2 uds • Factura #402", "Hoy 09:30 AM", THEME_TOKENS["amber"]),
+                ("ALERTA", "Monitor LG 24\"", "Stock por debajo del mínimo (8/10)", "Hoy 08:40 AM", THEME_TOKENS["amber"]),
+            ]
 
         for tag, title, detail, timestamp, color in events:
             item = ctk.CTkFrame(scrollable, fg_color=THEME_TOKENS["card_alt"], corner_radius=10)
@@ -525,6 +558,7 @@ class KardexDashboardApp(ctk.CTkToplevel):
 
     def _clear_workstage(self):
         """Destruyo todos los widgets hijos del contenedor antes de dibujar una nueva vista."""
+        self.current_view = None
         for widget in self.main_workstage.winfo_children():
             widget.destroy()
         for col_i in range(10):
@@ -543,6 +577,7 @@ class KardexDashboardApp(ctk.CTkToplevel):
         - Columna 2 (28%): Feed en tiempo real de operaciones recientes
         """
         self._clear_workstage()
+        self._load_summary_metrics()
         self.main_workstage.grid_rowconfigure(0, weight=1)
         self.main_workstage.grid_columnconfigure(0, weight=25, uniform="cols") # Col Izquierda 25%
         self.main_workstage.grid_columnconfigure(1, weight=47, uniform="cols") # Col Central 47%
@@ -603,56 +638,62 @@ class KardexDashboardApp(ctk.CTkToplevel):
     def _render_inventory_matrix_view(self):
         """Renderizo la tabla completa de existencias del inventario con buscador y semáforos."""
         self._clear_workstage()
+        self.main_workstage.grid_rowconfigure(0, weight=1)
         self.main_workstage.grid_columnconfigure(0, weight=1)
         self.main_workstage.grid_columnconfigure((1, 2), weight=0)
         from views.components.kardex_table import InventarioView
-        InventarioView(self.main_workstage, usuario=self.usuario, rol=self.rol).pack(fill="both", expand=True)
+        self.current_view = InventarioView(self.main_workstage, usuario=self.usuario, rol=self.rol)
+        self.current_view.grid(row=0, column=0, sticky="nsew")
 
     def _render_dispatch_inflow_view(self):
         """Renderizo el formulario para registrar entradas, salidas o solicitudes de ajuste."""
         self._clear_workstage()
+        self.main_workstage.grid_rowconfigure(0, weight=1)
         self.main_workstage.grid_columnconfigure(0, weight=1)
         self.main_workstage.grid_columnconfigure((1, 2), weight=0)
         from views.forms.movimiento_view import RegistroMovimientoView
-        RegistroMovimientoView(self.main_workstage, self.usuario).pack(fill="both", expand=True)
+        self.current_view = RegistroMovimientoView(self.main_workstage, self.usuario)
+        self.current_view.grid(row=0, column=0, sticky="nsew")
 
     def _render_master_control_view(self):
         """Renderizo el estudio Split-Pane para gestión de usuarios, ficha técnica y mesa de ajustes."""
         self._clear_workstage()
+        self.main_workstage.grid_rowconfigure(0, weight=1)
         self.main_workstage.grid_columnconfigure(0, weight=1)
         self.main_workstage.grid_columnconfigure((1, 2), weight=0)
         from views.forms.admin_view import AdminView
         tab_initial = "users" if self.es_admin else "products"
-        AdminView(self.main_workstage, usuario=self.usuario, initial_tab=tab_initial,
-                  es_admin=self.es_admin, rol=self.rol).pack(fill="both", expand=True)
+        self.current_view = AdminView(self.main_workstage, usuario=self.usuario, initial_tab=tab_initial,
+                                      es_admin=self.es_admin, rol=self.rol)
+        self.current_view.grid(row=0, column=0, sticky="nsew")
 
     # =========================================================================
     # ACCIONES RÁPIDAS DIRECTAS
     # =========================================================================
     def open_movement_action(self, movement_type="Entrada"):
-        """Navega a la vista de movimientos y preselecciona Entrada o Salida."""
+        """Navega a la vista de movimientos y preselecciona Entrada, Salida, Traslado o Ajuste."""
         self.navigate_to_tab("dispatch")
-        for widget in self.main_workstage.winfo_children():
-            if hasattr(widget, "cb_tipo") and hasattr(widget, "_on_tipo_changed"):
-                try:
-                    widget.cb_tipo.set(movement_type)
-                    widget._on_tipo_changed(movement_type)
-                except Exception:
-                    pass
+        view = getattr(self, "current_view", None)
+        if view and hasattr(view, "cb_tipo") and hasattr(view, "_on_tipo_changed"):
+            try:
+                view.cb_tipo.set(movement_type)
+                view._on_tipo_changed(movement_type)
+            except Exception:
+                pass
 
     def open_admin_catalog(self):
         """Navega directamente a la pestaña de administración y catálogo."""
         self.navigate_to_tab("master")
-        for widget in self.main_workstage.winfo_children():
-            if hasattr(widget, "show_tab"):
-                widget.show_tab("products")
+        view = getattr(self, "current_view", None)
+        if view and hasattr(view, "show_tab"):
+            view.show_tab("products")
 
     def open_admin_approvals(self):
         """Navega directamente a la mesa de autorización y auditoría de ajustes."""
         self.navigate_to_tab("master")
-        for widget in self.main_workstage.winfo_children():
-            if hasattr(widget, "show_tab"):
-                widget.show_tab("approvals")
+        view = getattr(self, "current_view", None)
+        if view and hasattr(view, "show_tab"):
+            view.show_tab("approvals")
 
     def quick_export_pdf(self):
         """Exporta el reporte general de existencias en formato PDF corporativo."""

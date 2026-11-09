@@ -795,7 +795,7 @@ class AdminView(ctk.CTkScrollableFrame):
             head, text="⟳   Actualizar Bandeja", width=140, height=36, corner_radius=9,
             fg_color=COLORS["card_alt"], hover_color=COLORS["border"],
             border_width=1, border_color=COLORS["border"], font=font(10, "bold"),
-            text_color=COLORS["text"], command=self._build_approvals
+            text_color=COLORS["text"], command=lambda: self.show_tab("approvals")
         ).grid(row=0, column=1, rowspan=2, sticky="e")
 
         # Lista deslizable donde renderizo cada solicitud con su tarjeta completa
@@ -843,10 +843,18 @@ class AdminView(ctk.CTkScrollableFrame):
         top_meta = ctk.CTkFrame(left_info, fg_color="transparent")
         top_meta.pack(fill="x", pady=(0, 6))
 
-        is_positive = item.get("efecto", 1) > 0
-        tipo_badge_color = COLORS["green"] if is_positive else COLORS["red"]
-        tipo_badge_bg = COLORS["green_bg"] if is_positive else COLORS["red_bg"]
-        tipo_sign = "+" if is_positive else "-"
+        es_traslado = "TRASLADO" in str(item.get("tipo", "")).upper() or item.get("efecto") == 0
+        if es_traslado:
+            tipo_badge_color = COLORS["cyan"]
+            tipo_badge_bg = COLORS["field"]
+            tipo_sign = "⇄"
+            cant_label = f" • Cantidad a trasladar: ⇄ {item['cantidad']:.1f} unidades"
+        else:
+            is_positive = item.get("efecto", 1) > 0
+            tipo_badge_color = COLORS["green"] if is_positive else COLORS["red"]
+            tipo_badge_bg = COLORS["green_bg"] if is_positive else COLORS["red_bg"]
+            tipo_sign = "+" if is_positive else "-"
+            cant_label = f" • Cantidad a ajustar: {tipo_sign}{item['cantidad']:.1f} unidades"
 
         ctk.CTkLabel(top_meta, text=f"  {tipo_sign}  {item['tipo'].upper()}  ", height=24,
                      corner_radius=6, fg_color=tipo_badge_bg, text_color=tipo_badge_color,
@@ -867,7 +875,7 @@ class AdminView(ctk.CTkScrollableFrame):
         ctk.CTkLabel(prod_title, text=f"Producto: {item['producto']} ({item['codigo']})",
                      font=font(13, "bold"), text_color=COLORS["text"], anchor="w").pack(side="left")
 
-        ctk.CTkLabel(prod_title, text=f" • Cantidad a ajustar: {tipo_sign}{item['cantidad']:.1f} unidades",
+        ctk.CTkLabel(prod_title, text=cant_label,
                      font=font(12, "bold"), text_color=tipo_badge_color).pack(side="left", padx=8)
 
         # ---------------- CAJA DESTACADA: DESCRIPCIÓN DEL PORQUÉ LO SOLICITAN ----------------
@@ -946,15 +954,15 @@ class AdminView(ctk.CTkScrollableFrame):
         if ok:
             # Agrego el ID a las solicitudes procesadas para que se remueva de inmediato de la vista
             self.solicitudes_procesadas.add(item["id_movimiento"])
-            messagebox.showinfo("Ajuste Aprobado", f"Ajuste {item['folio']} aprobado con éxito.\n{msg}\nLas existencias físicas han sido actualizadas en la base de datos.")
-            self._build_approvals()
+            messagebox.showinfo("Solicitud Aprobada", f"Operación {item['folio']} aprobada con éxito.\n{msg}\nLas existencias físicas han sido actualizadas en la base de datos.")
+            self.show_tab("approvals")
         else:
-            messagebox.showerror("Error al Aprobar Ajuste", f"No fue posible aprobar el ajuste {item['folio']}:\n{msg}")
+            messagebox.showerror("Error al Aprobar Solicitud", f"No fue posible aprobar la solicitud {item['folio']}:\n{msg}")
 
     def rechazar_solicitud(self, item):
         """Aquí ejecuto el rechazo del ajuste, pidiendo el motivo del rechazo."""
         dialog = ctk.CTkInputDialog(
-            title="Rechazar Solicitud de Ajuste",
+            title="Rechazar Solicitud",
             text=f"Ingresa el motivo del rechazo para la solicitud {item['folio']}:"
         )
         motivo = dialog.get_input()
@@ -971,7 +979,7 @@ class AdminView(ctk.CTkScrollableFrame):
             messagebox.showinfo("Solicitud Rechazada",
                                 f"La solicitud {item['folio']} ha sido rechazada formalmente.\n"
                                 f"Motivo asentado: {motivo or 'Rechazado por Administrador sin observaciones.'}")
-            self._build_approvals()
+            self.show_tab("approvals")
         else:
             messagebox.showerror("Error al Rechazar Ajuste", f"No fue posible procesar el rechazo:\n{msg}")
 

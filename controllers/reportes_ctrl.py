@@ -567,13 +567,14 @@ def exportar_pdf_movimientos_7_dias(usuario_nombre=None, rol_nombre=None):
                     elif "SALIDA" in tipo_nom or "NEGATIVO" in tipo_nom:
                         total_salidas += cant
                     
+                    bodega_str = f"{origen_nom} -> {destino_nom}" if (m.bodega_origen and m.bodega_destino) else (destino_nom if destino_nom != "-" else origen_nom)
                     movs_data.append({
                         "folio": m.FOLIO_COMPROBANTE,
                         "fecha": m.FECHA_MOVIMIENTO.strftime("%d/%m/%Y %I:%M %p"),
                         "tipo": tipo_nom,
                         "producto": prod_nom,
                         "cantidad": cant,
-                        "bodega": destino_nom if destino_nom != "-" else origen_nom,
+                        "bodega": bodega_str,
                         "doc": m.DOC_REFERENCIA or "-",
                         "usuario": user_nom,
                         "estado": m.ESTADO_APROBACION or "APROBADO"
@@ -707,8 +708,9 @@ def exportar_pdf_existencias(usuario_nombre=None, rol_nombre=None, filtro_bodega
                 # Filtros opcionales si fueron especificados
                 if filtro_bodega and filtro_bodega != "Todas las bodegas" and bodega != filtro_bodega:
                     continue
-                if filtro_estado and filtro_estado != "Todos los estados" and estado != filtro_estado:
-                    continue
+                if filtro_estado and filtro_estado != "Todos los estados":
+                    if not (estado == filtro_estado or (filtro_estado == "Bajo" and estado == "Stock Bajo")):
+                        continue
 
                 total_unidades += s_act_val
                 existencias_data.append({
